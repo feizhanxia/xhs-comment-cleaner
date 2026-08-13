@@ -45,7 +45,7 @@ jobs:
       - name: Verify sync Playwright is absent from EXE
         shell: pwsh
         run: |
-          $archive = pyi-archive_viewer -r ".\dist\XHSCommentCleaner.exe"
+          $archive = (pyi-archive_viewer -r ".\dist\XHSCommentCleaner.exe" | Out-String)
           if ($archive -notmatch "playwright\.async_api") {
             throw "Async Playwright API is missing from the packaged EXE"
           }
