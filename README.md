@@ -3,16 +3,16 @@
 [![Build Windows EXE](https://github.com/feizhanxia/xhs-comment-cleaner/actions/workflows/build-windows.yml/badge.svg)](https://github.com/feizhanxia/xhs-comment-cleaner/actions/workflows/build-windows.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-一款面向普通用户的 Windows 本地工具：使用系统自带的 Microsoft Edge，扫描当前小红书账号能够发现的历史评论和回复，并在多重确认后逐条删除。
+一个用于验证“小红书历史评论本地清理”可行性的 Windows 开源项目。它使用系统自带的 Microsoft Edge，并坚持只在能够确认评论 ID、作者和原笔记时执行删除。
 
 ```text
-双击 EXE → 人工登录小红书 → 扫描 → 确认 → 逐条删除
+双击 EXE → 人工登录小红书 → 验证网页能力
 ```
 
 不需要安装 Python、Node.js、Playwright 浏览器或 Chrome；不需要命令行、云服务器、账号系统或管理员权限。
 
 > [!CAUTION]
-> 删除操作通常无法恢复。当前项目仍处于测试阶段，请先使用专门测试账号和少量测试评论验证。项目只能处理网页端本次扫描能够发现、且能确认属于当前账号的记录，不承诺覆盖账号 100% 的历史评论。小红书页面变化也可能使扫描或删除安全停止。
+> 当前已确认的主要限制是：小红书普通 Edge 网页版没有经过验证的“我发出的全部评论”入口，因此本项目当前**不能自动枚举账号全部历史评论，也不能完成最初承诺的一键清理目标**。程序会拒绝在首页或任意笔记页扫描，不再用“0 条”掩盖入口缺失。请勿把当前版本用于正式批量删除。
 
 ## 下载 Windows EXE
 
@@ -49,14 +49,15 @@ python -m app.main
 
 不要运行 `playwright install`。程序通过 `channel="msedge"` 启动系统 Edge，不携带 Chromium、Firefox 或 WebKit。
 
-## 调试与真实页面校准
+## 当前可行性结论
 
-1. 运行程序，点击“打开小红书 / 登录”，人工完成登录。
-2. 在程序打开的独立 Edge 中进入能够看到“我发表的评论/互动记录”的页面。
-3. 回到程序，检查登录状态，然后点击“扫描当前评论记录页”。
-4. 扫描器只观察正常页面已经产生的 JSON response，并只保存 `author_id == current_user_id` 的记录；DOM fallback 只接受带稳定评论 ID 的容器。
-5. 用专门的测试账号和可恢复的测试评论完成单条删除 PoC。根据真实快照修改 `app/xhs/selectors.py`，不得添加坐标点击或位置型 selector。
-6. 验证目标评论 ID 刷新后不存在，再进行 10 条评论、异常 selector、登录失效和风控测试。
+1. 普通网页版能打开笔记和评论区，但未发现集中展示当前账号“发出的全部评论”的可靠入口。
+2. “消息 / 评论和 @”主要是收到的互动，不能据此证明覆盖自己主动发出的全部评论。
+3. 没有历史评论清单，就无法得到每条评论所属笔记的 URL 与评论 ID；只滚动首页无法扫描历史评论。
+4. 直接构造未公开接口、读取手机 App 私有流量或绕过平台限制，不符合本项目的安全约束，也无法作为稳定开源方案。
+5. 后续只有在小红书提供官方历史列表、官方数据导出包含可定位字段，或用户合法提供一份原笔记链接清单时，才能继续验证逐条定位和删除流程。
+
+程序仍保留扫描和删除代码用于研究，但扫描前必须识别明确的“我发出的评论”页面；否则会停止并说明原因。
 
 设置 `XHS_CLEANER_DEBUG=1` 可在开发环境开启控制台日志。异常截图和日志位于 `%LOCALAPPDATA%\XHSCommentCleaner\`。
 
@@ -95,7 +96,7 @@ GitHub Actions 会在 `windows-latest` 上用 Python 3.12 运行测试、构建�
 
 ## 已知限制
 
-- 尚未使用真实小红书测试账号验证当前页面入口、网络字段和 selector。
+- 当前普通网页版未发现可验证的“我发出的全部评论”入口，核心自动枚举目标尚不可实现。
 - 扫描仅在明确看到“没有更多了/已经到底了”时标记完整，否则界面会明确提示覆盖范围不确定。
 - 当前网页若不暴露稳定 comment ID 或可靠作者 ID，程序会安全停止，不能删除。
 

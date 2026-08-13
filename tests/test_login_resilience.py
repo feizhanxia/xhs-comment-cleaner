@@ -59,6 +59,25 @@ class LoginResilienceTest(unittest.IsolatedAsyncioTestCase):
         manager.context.pages = [manager.page, fallback, xhs]
         self.assertIs(await manager.active_page(), xhs)
 
+    async def test_browser_restores_xhs_after_all_pages_were_closed(self) -> None:
+        manager = BrowserManager(Mock(), Mock())
+        blank = FakePage("about:blank")
+
+        async def goto(url, **_kwargs):
+            blank.url = url
+
+        blank.goto = AsyncMock(side_effect=goto)
+        blank.bring_to_front = AsyncMock()
+        manager.start = AsyncMock(return_value=blank)
+
+        page = await manager.ensure_xhs_page()
+
+        self.assertIs(page, blank)
+        blank.goto.assert_awaited_once_with(
+            "https://www.xiaohongshu.com/", wait_until="domcontentloaded"
+        )
+        blank.bring_to_front.assert_awaited_once()
+
     async def test_generic_login_word_is_not_a_required_marker(self) -> None:
         self.assertNotIn("登录", selectors.LOGIN_REQUIRED_TEXT)
 
@@ -79,7 +98,7 @@ class LoginResilienceTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_worker_survives_page_closing_during_login_check(self) -> None:
         browser = Mock()
-        browser.start = AsyncMock(return_value=ErrorUrlPage())
+        browser.ensure_xhs_page = AsyncMock(return_value=ErrorUrlPage())
         worker = BrowserWorker(Mock(), Mock(), Mock())
         worker._browser = Mock(return_value=browser)
         errors: list[str] = []

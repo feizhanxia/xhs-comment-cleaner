@@ -145,7 +145,9 @@ class BrowserWorker(QObject):
     async def _check_login(self) -> None:
         self.logger.info("action=check_login result=started")
         try:
-            page = await self._browser().start()
+            # When the user closes every controlled Edge tab/context, Playwright
+            # relaunches with about:blank. Restore XHS before evaluating login.
+            page = await self._browser().ensure_xhs_page()
             logged_in = await LoginManager(page).is_logged_in()
             self.login_changed.emit(logged_in)
             state = CleanupState.IDLE if logged_in else CleanupState.LOGIN_REQUIRED
@@ -173,6 +175,7 @@ class BrowserWorker(QObject):
         self._pause_requested.clear()
         try:
             page = await self._browser().start()
+            self.logger.info("action=scan result=started host=%s", self._page_host(page))
             login = LoginManager(page)
             if not await login.is_logged_in():
                 raise LoginExpired("请先在打开的 Edge 中完成登录")
@@ -188,6 +191,10 @@ class BrowserWorker(QObject):
             )
             _new_count, complete = await scanner.scan_my_comment_history()
             total = self.database.counts()["discovered"]
+            self.logger.info(
+                "action=scan result=success new=%d total=%d complete=%s",
+                _new_count, total, complete,
+            )
             self.counts_changed.emit(self.database.counts())
             self.scan_finished.emit(complete, total)
             state = CleanupState.PAUSED if self._pause_requested.is_set() else CleanupState.READY
@@ -200,6 +207,7 @@ class BrowserWorker(QObject):
             self.state_changed.emit(CleanupState.BLOCKED.value, str(exc))
         except UnsupportedPageState as exc:
             await self._screenshot("scan_unsupported")
+            self.logger.warning("action=scan result=unsupported reason=%s", exc)
             self.state_changed.emit(CleanupState.PAUSED.value, str(exc))
         except Exception:
             await self._screenshot("scan_failed")
@@ -341,7 +349,7 @@ class MainWindow(QMainWindow):
         eyebrow.setObjectName("eyebrow")
         title = QLabel("历史评论清理")
         title.setObjectName("title")
-        subtitle = QLabel("本地运行 · 使用独立 Edge 环境 · 每条删除均经过确认")
+        subtitle = QLabel("本地运行 · 使用独立 Edge 环境 · 当前处于网页能力验证阶段")
         subtitle.setObjectName("subtitle")
         header_text.addWidget(eyebrow)
         header_text.addWidget(title)
@@ -407,7 +415,9 @@ class MainWindow(QMainWindow):
                 divider.setObjectName("divider")
                 metrics.addWidget(divider)
         history_layout.addLayout(metrics)
-        self.coverage_label = QLabel("尚未扫描。请先确认登录状态，再开始扫描。")
+        self.coverage_label = QLabel(
+            "网页端尚未发现可靠的历史评论入口；扫描会先验证当前页面，不会把无结果误报为 0 条。"
+        )
         self.coverage_label.setObjectName("muted")
         self.coverage_label.setWordWrap(True)
         history_layout.addWidget(self.coverage_label)

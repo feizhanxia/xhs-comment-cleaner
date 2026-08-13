@@ -72,6 +72,19 @@ class BrowserManager:
         await page.bring_to_front()
         return page
 
+    async def ensure_xhs_page(self) -> Page:
+        """Return a live XHS page, navigating a replacement blank tab if needed."""
+        page = await self.start()
+        try:
+            on_xhs = page.url.startswith(XHS_HOME)
+        except Exception:
+            on_xhs = False
+        if not on_xhs:
+            self.logger.info("action=edge_restore_xhs from_url=%s", self._safe_url(page))
+            await page.goto(XHS_HOME, wait_until="domcontentloaded")
+        await page.bring_to_front()
+        return page
+
     async def screenshot(self, directory: Path, label: str) -> Path | None:
         if not self.page or self.page.is_closed():
             return None
@@ -100,3 +113,10 @@ class BrowserManager:
             self.logger.exception("action=playwright_stop result=failed")
         finally:
             self._playwright = None
+
+    @staticmethod
+    def _safe_url(page: Page) -> str:
+        try:
+            return page.url
+        except Exception:
+            return "unavailable"

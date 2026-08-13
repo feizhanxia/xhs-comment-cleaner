@@ -39,3 +39,8 @@ LOGIN_EXPIRED_TEXT = ("登录状态已失效", "请登录", "重新登录")
 
 # Used only to observe history items already rendered by a normal page.
 HISTORY_END_TEXT = ("没有更多了", "已经到底了")
+
+# A scan must never treat the home feed or an arbitrary note as a comment-history
+# source. These labels are deliberately narrow: if XHS does not expose a page that
+# explicitly identifies sent comments, scanning stops instead of reporting a false 0.
+SENT_COMMENT_HISTORY_TEXT = ("我发表的评论", "我发出的评论", "发出的评论")

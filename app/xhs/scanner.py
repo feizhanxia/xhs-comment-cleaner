@@ -40,6 +40,11 @@ class HistoryScanner:
     async def scan_my_comment_history(self, max_stagnant_rounds: int = 5) -> tuple[int, bool]:
         if not self.page.url.startswith("https://www.xiaohongshu.com/"):
             raise UnsupportedPageState("请先在 Edge 中打开小红书的评论互动记录页面")
+        if not await self._is_sent_comment_history_page():
+            raise UnsupportedPageState(
+                "当前页面不是可验证的“我发出的评论”列表。当前小红书网页版未发现该入口，"
+                "程序已停止扫描，不会把 0 条误报为账号没有历史评论。"
+            )
         await detect_risk_control(self.page)
         response_tasks: set[asyncio.Task] = set()
 
@@ -155,6 +160,15 @@ class HistoryScanner:
             return any(marker in text for marker in selectors.HISTORY_END_TEXT)
         except Exception:
             return False
+
+    async def _is_sent_comment_history_page(self) -> bool:
+        for marker in selectors.SENT_COMMENT_HISTORY_TEXT:
+            try:
+                if await self.page.get_by_text(marker, exact=True).first.is_visible(timeout=500):
+                    return True
+            except Exception:
+                continue
+        return False
 
     @staticmethod
     def _walk_dicts(value: object) -> Iterator[dict]:
