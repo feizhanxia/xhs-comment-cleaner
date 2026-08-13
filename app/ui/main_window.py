@@ -2,20 +2,21 @@ from __future__ import annotations
 
 import logging
 import threading
+from urllib.parse import urlsplit
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot, Qt
 from PySide6.QtGui import QCloseEvent, QDesktopServices
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
     QDialog,
-    QGridLayout,
-    QGroupBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -27,6 +28,7 @@ from app.core.exceptions import EdgeUnavailable, LoginExpired, RiskControlDetect
 from app.core.state import CleanupState, STATE_TEXT
 from app.storage.database import Database
 from app.ui.dialogs import ConfirmDeleteDialog, PreviewDialog
+from app.ui.styles import APP_STYLESHEET
 from app.utils.paths import AppPaths
 from app.xhs.deleter import CommentDeleter
 from app.xhs.scanner import HistoryScanner
@@ -56,12 +58,14 @@ class BrowserWorker(QObject):
 
     @Slot()
     def open_xhs(self) -> None:
+        self.logger.info("action=open_xhs result=started")
         try:
             page = self._browser().open_xhs()
             logged_in = LoginManager(page).is_logged_in()
             self.login_changed.emit(logged_in)
             state = CleanupState.IDLE if logged_in else CleanupState.LOGIN_REQUIRED
             self.state_changed.emit(state.value, STATE_TEXT[state])
+            self.logger.info("action=open_xhs result=success logged_in=%s", logged_in)
         except EdgeUnavailable as exc:
             self.error.emit(str(exc))
         except Exception:
@@ -70,14 +74,27 @@ class BrowserWorker(QObject):
 
     @Slot()
     def check_login(self) -> None:
+        self.logger.info("action=check_login result=started")
         try:
             page = self._browser().start()
             logged_in = LoginManager(page).is_logged_in()
             self.login_changed.emit(logged_in)
-            if not logged_in:
-                self.state_changed.emit(CleanupState.LOGIN_REQUIRED.value, STATE_TEXT[CleanupState.LOGIN_REQUIRED])
+            state = CleanupState.IDLE if logged_in else CleanupState.LOGIN_REQUIRED
+            message = "登录状态正常，可以开始扫描" if logged_in else STATE_TEXT[state]
+            self.state_changed.emit(state.value, message)
+            self.logger.info(
+                "action=check_login result=success logged_in=%s host=%s",
+                logged_in, self._page_host(page),
+            )
         except EdgeUnavailable as exc:
+            self.logger.exception("action=check_login result=edge_unavailable")
             self.error.emit(str(exc))
+        except Exception as exc:
+            self.logger.exception(
+                "action=check_login result=failed error=%s", type(exc).__name__
+            )
+            self.state_changed.emit(CleanupState.ERROR.value, "检查登录状态失败，请重新打开小红书后再试")
+            self.error.emit("检查登录状态失败。程序没有继续操作，请重新打开小红书后再试。")
 
     @Slot()
     def scan(self) -> None:
@@ -143,14 +160,25 @@ class BrowserWorker(QObject):
             self.state_changed.emit(CleanupState.PAUSED.value, str(exc))
         except EdgeUnavailable as exc:
             self.error.emit(str(exc))
+        except Exception as exc:
+            self._screenshot("delete_unexpected")
+            self.logger.exception(
+                "action=delete_all result=failed error=%s", type(exc).__name__
+            )
+            self.state_changed.emit(CleanupState.ERROR.value, "清理任务发生异常，已安全停止")
+            self.error.emit("清理任务发生异常，程序已安全停止。详细信息已写入日志。")
         finally:
             self.cleanup = None
 
     @Slot()
     def shutdown(self) -> None:
-        if self.browser:
-            self.browser.close()
-        self.finished.emit()
+        try:
+            if self.browser:
+                self.browser.close()
+        except Exception:
+            self.logger.exception("action=shutdown result=failed")
+        finally:
+            self.finished.emit()
 
     def _browser(self) -> BrowserManager:
         if self.browser is None:
@@ -160,6 +188,13 @@ class BrowserWorker(QObject):
     def _screenshot(self, label: str) -> None:
         if self.browser:
             self.browser.screenshot(self.paths.screenshots, label)
+
+    @staticmethod
+    def _page_host(page) -> str:
+        try:
+            return urlsplit(page.url).hostname or "unknown"
+        except Exception:
+            return "unavailable"
 
 
 class MainWindow(QMainWindow):
@@ -175,9 +210,14 @@ class MainWindow(QMainWindow):
         self.database = database
         self.logger = logger
         self.current_state = CleanupState.IDLE
+        self.logged_in = False
         self.setWindowTitle("小红书历史评论清理工具")
-        self.setMinimumSize(560, 580)
+        self.setMinimumSize(780, 720)
+        self.resize(860, 780)
+        self.setStyleSheet(APP_STYLESHEET)
         self._build_ui()
+        self._update_login(False)
+        self.pause_button.setEnabled(False)
 
         self.thread = QThread(self)
         self.worker = BrowserWorker(paths, database, logger)
@@ -200,73 +240,134 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         central = QWidget()
+        central.setObjectName("root")
         layout = QVBoxLayout(central)
-        title = QLabel("小红书历史评论清理工具")
-        title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("font-size: 22px; font-weight: 600; margin: 14px;")
-        layout.addWidget(title)
+        layout.setContentsMargins(38, 30, 38, 30)
+        layout.setSpacing(18)
 
-        login_box = QGroupBox("登录状态")
-        login_layout = QHBoxLayout(login_box)
-        self.login_label = QLabel("● 未确认")
-        self.open_button = QPushButton("打开小红书 / 登录")
-        self.check_button = QPushButton("我已登录，检查状态")
-        login_layout.addWidget(self.login_label)
-        login_layout.addStretch()
-        login_layout.addWidget(self.open_button)
-        login_layout.addWidget(self.check_button)
-        layout.addWidget(login_box)
+        header = QHBoxLayout()
+        header.setSpacing(18)
+        header_text = QVBoxLayout()
+        header_text.setSpacing(3)
+        eyebrow = QLabel("XHS COMMENT CLEANER")
+        eyebrow.setObjectName("eyebrow")
+        title = QLabel("历史评论清理")
+        title.setObjectName("title")
+        subtitle = QLabel("本地运行 · 使用独立 Edge 环境 · 每条删除均经过确认")
+        subtitle.setObjectName("subtitle")
+        header_text.addWidget(eyebrow)
+        header_text.addWidget(title)
+        header_text.addWidget(subtitle)
+        header.addLayout(header_text)
+        header.addStretch()
+        self.log_button = self._button("查看日志", "quiet")
+        header.addWidget(self.log_button, 0, Qt.AlignBottom)
+        layout.addLayout(header)
 
-        history_box = QGroupBox("历史评论")
-        grid = QGridLayout(history_box)
+        account = self._surface()
+        account_layout = QHBoxLayout(account)
+        account_layout.setContentsMargins(24, 20, 24, 20)
+        account_layout.setSpacing(14)
+        self.login_dot = QFrame()
+        self.login_dot.setObjectName("statusDot")
+        self.login_dot.setFixedSize(12, 12)
+        account_layout.addWidget(self.login_dot, 0, Qt.AlignVCenter)
+        login_text = QVBoxLayout()
+        login_text.setSpacing(2)
+        self.login_label = QLabel("尚未检查登录状态")
+        self.login_label.setObjectName("statusTitle")
+        self.login_hint = QLabel("打开小红书并完成扫码或手机号登录")
+        self.login_hint.setObjectName("muted")
+        login_text.addWidget(self.login_label)
+        login_text.addWidget(self.login_hint)
+        account_layout.addLayout(login_text)
+        account_layout.addStretch()
+        self.open_button = self._button("打开小红书", "primary")
+        self.check_button = self._button("检查登录状态", "secondary")
+        account_layout.addWidget(self.open_button)
+        account_layout.addWidget(self.check_button)
+        layout.addWidget(account)
+
+        history = self._surface()
+        history_layout = QVBoxLayout(history)
+        history_layout.setContentsMargins(24, 20, 24, 22)
+        history_layout.setSpacing(16)
+        history_header = QHBoxLayout()
+        history_title = QLabel("扫描结果")
+        history_title.setObjectName("sectionTitle")
+        history_header.addWidget(history_title)
+        history_header.addStretch()
+        self.preview_button = self._button("查看结果", "quiet")
+        self.scan_button = self._button("开始扫描", "secondary")
+        history_header.addWidget(self.preview_button)
+        history_header.addWidget(self.scan_button)
+        history_layout.addLayout(history_header)
+
+        metrics = QHBoxLayout()
+        metrics.setSpacing(18)
         self.count_labels: dict[str, QLabel] = {}
-        for column, (key, text) in enumerate((
+        metric_items = (
             ("discovered", "已发现"), ("pending", "待删除"),
             ("deleted", "已删除"), ("failed", "失败"), ("skipped", "已跳过"),
-        )):
-            grid.addWidget(QLabel(text), 0, column)
-            label = QLabel("0")
-            label.setAlignment(Qt.AlignCenter)
-            label.setStyleSheet("font-size: 18px; font-weight: 600;")
-            self.count_labels[key] = label
-            grid.addWidget(label, 1, column)
-        controls = QHBoxLayout()
-        self.scan_button = QPushButton("扫描当前评论记录页")
-        self.preview_button = QPushButton("查看扫描结果")
-        controls.addWidget(self.scan_button)
-        controls.addWidget(self.preview_button)
-        grid.addLayout(controls, 2, 0, 1, 5)
-        self.coverage_label = QLabel("尚未扫描")
+        )
+        for index, (key, text) in enumerate(metric_items):
+            metric, value = self._metric(text)
+            self.count_labels[key] = value
+            metrics.addWidget(metric, 1)
+            if index < len(metric_items) - 1:
+                divider = QFrame()
+                divider.setObjectName("divider")
+                metrics.addWidget(divider)
+        history_layout.addLayout(metrics)
+        self.coverage_label = QLabel("尚未扫描。请先确认登录状态，再开始扫描。")
+        self.coverage_label.setObjectName("muted")
         self.coverage_label.setWordWrap(True)
-        grid.addWidget(self.coverage_label, 3, 0, 1, 5)
-        layout.addWidget(history_box)
+        history_layout.addWidget(self.coverage_label)
+        layout.addWidget(history)
 
-        delete_box = QGroupBox("清理进度")
-        delete_layout = QVBoxLayout(delete_box)
+        cleanup = self._surface()
+        delete_layout = QVBoxLayout(cleanup)
+        delete_layout.setContentsMargins(24, 20, 24, 22)
+        delete_layout.setSpacing(14)
+        cleanup_header = QHBoxLayout()
+        cleanup_title = QLabel("清理进度")
+        cleanup_title.setObjectName("sectionTitle")
+        self.progress_detail = QLabel("0 / 0")
+        self.progress_detail.setObjectName("muted")
+        cleanup_header.addWidget(cleanup_title)
+        cleanup_header.addStretch()
+        cleanup_header.addWidget(self.progress_detail)
+        delete_layout.addLayout(cleanup_header)
         self.progress = QProgressBar()
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
-        self.delete_button = QPushButton("删除全部已扫描评论")
-        self.pause_button = QPushButton("暂停")
+        self.progress.setTextVisible(False)
+        self.delete_button = self._button("删除全部已扫描评论", "primary")
+        self.pause_button = self._button("暂停", "secondary")
         buttons = QHBoxLayout()
+        buttons.setSpacing(12)
         buttons.addWidget(self.delete_button)
         buttons.addWidget(self.pause_button)
         delete_layout.addWidget(self.progress)
         delete_layout.addLayout(buttons)
-        layout.addWidget(delete_box)
+        layout.addWidget(cleanup)
 
-        status_box = QGroupBox("当前状态")
-        status_layout = QVBoxLayout(status_box)
+        status = QFrame()
+        status.setObjectName("surface")
+        status_layout = QHBoxLayout(status)
+        status_layout.setContentsMargins(24, 16, 24, 16)
+        status_caption = QLabel("当前状态")
+        status_caption.setObjectName("sectionTitle")
         self.status_label = QLabel("等待操作")
+        self.status_label.setObjectName("statusText")
         self.status_label.setWordWrap(True)
+        self.status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        status_layout.addWidget(status_caption)
+        status_layout.addSpacing(18)
         status_layout.addWidget(self.status_label)
-        layout.addWidget(status_box)
-
-        footer = QHBoxLayout()
-        self.log_button = QPushButton("查看日志")
-        footer.addStretch()
-        footer.addWidget(self.log_button)
-        layout.addLayout(footer)
+        status_layout.addStretch()
+        layout.addWidget(status)
+        layout.addStretch(1)
         self.setCentralWidget(central)
 
         self.open_button.clicked.connect(self.open_requested.emit)
@@ -277,13 +378,47 @@ class MainWindow(QMainWindow):
         self.pause_button.clicked.connect(self._pause)
         self.log_button.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.paths.log_file))))
 
+    @staticmethod
+    def _button(text: str, variant: str) -> QPushButton:
+        button = QPushButton(text)
+        button.setProperty("variant", variant)
+        button.setCursor(Qt.PointingHandCursor)
+        return button
+
+    @staticmethod
+    def _surface() -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("surface")
+        return frame
+
+    @staticmethod
+    def _metric(text: str) -> tuple[QWidget, QLabel]:
+        widget = QWidget()
+        widget.setStyleSheet("background: transparent;")
+        column = QVBoxLayout(widget)
+        column.setContentsMargins(4, 2, 4, 2)
+        column.setSpacing(1)
+        value = QLabel("0")
+        value.setObjectName("metricValue")
+        value.setAlignment(Qt.AlignCenter)
+        label = QLabel(text)
+        label.setObjectName("metricLabel")
+        label.setAlignment(Qt.AlignCenter)
+        column.addWidget(value)
+        column.addWidget(label)
+        return widget, value
+
     @Slot(str, str)
     def _set_state(self, state: str, message: str) -> None:
         self.current_state = CleanupState(state)
         self.status_label.setText(message)
         busy = self.current_state in (CleanupState.SCANNING, CleanupState.DELETING)
-        self.scan_button.setEnabled(not busy)
-        self.delete_button.setEnabled(not busy and self.database.counts()["pending"] > 0)
+        self.open_button.setEnabled(not busy)
+        self.check_button.setEnabled(not busy)
+        self.scan_button.setEnabled(not busy and self.logged_in)
+        self.delete_button.setEnabled(
+            not busy and self.logged_in and self.database.counts()["pending"] > 0
+        )
         self.pause_button.setEnabled(busy)
 
     @Slot(dict)
@@ -294,14 +429,30 @@ class MainWindow(QMainWindow):
         done = counts.get("deleted", 0) + counts.get("failed", 0) + counts.get("skipped", 0)
         self.progress.setRange(0, max(total, 1))
         self.progress.setValue(done)
-        self.progress.setFormat(f"{done} / {total}")
+        self.progress_detail.setText(f"{done} / {total}")
         self.delete_button.setText("继续删除" if counts.get("deleted", 0) else "删除全部已扫描评论")
-        self.delete_button.setEnabled(self.current_state not in (CleanupState.SCANNING, CleanupState.DELETING) and counts.get("pending", 0) > 0)
+        self.preview_button.setEnabled(total > 0)
+        self.delete_button.setEnabled(
+            self.logged_in
+            and self.current_state not in (CleanupState.SCANNING, CleanupState.DELETING)
+            and counts.get("pending", 0) > 0
+        )
 
     @Slot(bool)
     def _update_login(self, logged_in: bool) -> None:
-        self.login_label.setText("● 已登录" if logged_in else "● 未登录")
-        self.login_label.setStyleSheet("color: #18864b;" if logged_in else "color: #a33;")
+        self.logged_in = logged_in
+        self.login_label.setText("已登录，可以继续" if logged_in else "尚未确认登录")
+        self.login_hint.setText(
+            "登录状态保存在此工具的独立 Edge 环境中" if logged_in else
+            "打开小红书并完成扫码或手机号登录"
+        )
+        color = "#22A06B" if logged_in else "#A7ABB2"
+        self.login_dot.setStyleSheet(f"background: {color}; border-radius: 6px;")
+        busy = self.current_state in (CleanupState.SCANNING, CleanupState.DELETING)
+        self.scan_button.setEnabled(logged_in and not busy)
+        self.delete_button.setEnabled(
+            logged_in and not busy and self.database.counts()["pending"] > 0
+        )
 
     @Slot(bool, int)
     def _scan_finished(self, complete: bool, total: int) -> None:
@@ -343,4 +494,5 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "正在安全退出", "当前操作尚未结束，请稍后再次关闭程序。")
             event.ignore()
             return
+        self.logger.info("action=app_stop result=success")
         event.accept()

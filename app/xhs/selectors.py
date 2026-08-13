@@ -5,7 +5,9 @@ attributes. They MUST be revalidated against the current Xiaohongshu web page be
 a release. No positional selectors or screen coordinates are allowed.
 """
 
-LOGIN_REQUIRED_TEXT = ("登录后推荐更懂你的笔记", "登录", "扫码登录")
+# Do not use the generic word "登录": it can remain visible in navigation while
+# another part of the page already reflects an authenticated session.
+LOGIN_REQUIRED_TEXT = ("登录后推荐更懂你的笔记", "扫码登录", "手机号登录")
 LOGGED_IN_MARKERS = (
     'a[href*="/user/profile/"] img',
     '[data-testid="user-avatar"]',

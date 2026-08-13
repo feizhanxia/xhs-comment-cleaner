@@ -24,8 +24,12 @@ class BrowserManager:
         self.page: Page | None = None
 
     def start(self) -> Page:
-        if self.page and not self.page.is_closed():
-            return self.page
+        if self.context:
+            try:
+                return self.active_page()
+            except Exception:
+                self.logger.exception("action=edge_recover result=relaunch")
+                self.close()
         try:
             self._playwright = sync_playwright().start()
             self.context = self._playwright.chromium.launch_persistent_context(
@@ -38,12 +42,31 @@ class BrowserManager:
             )
             self.context.set_default_timeout(8_000)
             self.context.set_default_navigation_timeout(30_000)
-            self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
+            self.page = self.active_page()
+            self.logger.info("action=edge_start result=success pages=%d", len(self.context.pages))
             return self.page
         except Exception as exc:
             self.close()
             self.logger.exception("action=edge_start result=failed error=%s", type(exc).__name__)
             raise EdgeUnavailable("无法启动 Microsoft Edge。请确认 Microsoft Edge 已正常安装。") from exc
+
+    def active_page(self) -> Page:
+        """Return a live XHS tab, recovering when the original tab was closed."""
+        if not self.context:
+            raise RuntimeError("Edge context is not running")
+        pages = [page for page in self.context.pages if not page.is_closed()]
+        for page in reversed(pages):
+            try:
+                if page.url.startswith("https://www.xiaohongshu.com"):
+                    self.page = page
+                    return page
+            except Exception:
+                continue
+        if pages:
+            self.page = pages[-1]
+            return self.page
+        self.page = self.context.new_page()
+        return self.page
 
     def open_xhs(self) -> Page:
         page = self.start()

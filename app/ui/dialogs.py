@@ -17,15 +17,24 @@ class ConfirmDeleteDialog(QDialog):
     def __init__(self, count: int, parent=None):
         super().__init__(parent)
         self.setWindowTitle("确认永久删除")
+        self.setMinimumWidth(520)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
+        layout.setContentsMargins(28, 26, 28, 24)
+        layout.setSpacing(22)
+        message = QLabel(
             f"已扫描到 {count} 条待处理的历史评论和回复。\n\n"
-            "即将永久删除这些内容，删除后通常无法恢复。\n\n是否继续？"
-        ))
+            "即将永久删除这些内容，删除后通常无法恢复。"
+        )
+        message.setWordWrap(True)
+        message.setStyleSheet("font-size: 17px; line-height: 1.6;")
+        layout.addWidget(message)
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Ok)
         self.confirm_button = buttons.button(QDialogButtonBox.Ok)
+        self.confirm_button.setProperty("variant", "primary")
         self.confirm_button.setText("确认删除（2）")
-        buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        cancel_button = buttons.button(QDialogButtonBox.Cancel)
+        cancel_button.setText("取消")
+        cancel_button.setProperty("variant", "secondary")
         self.confirm_button.setEnabled(False)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -49,8 +58,9 @@ class PreviewDialog(QDialog):
     def __init__(self, comments: list[Comment], parent=None):
         super().__init__(parent)
         self.setWindowTitle("扫描结果")
-        self.resize(760, 440)
+        self.resize(900, 560)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
         table = QTableWidget(len(comments), 3)
         table.setHorizontalHeaderLabels(["评论内容", "笔记链接", "状态"])
         for row, comment in enumerate(comments):
@@ -58,5 +68,8 @@ class PreviewDialog(QDialog):
             table.setItem(row, 1, QTableWidgetItem(comment.note_url))
             table.setItem(row, 2, QTableWidgetItem(comment.delete_status))
         table.setEditTriggers(QTableWidget.NoEditTriggers)
+        table.setAlternatingRowColors(True)
+        table.verticalHeader().setDefaultSectionSize(44)
+        table.verticalHeader().setVisible(False)
         table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(table)

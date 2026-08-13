@@ -11,15 +11,31 @@ class LoginManager:
 
     def is_logged_in(self) -> bool:
         """Conservative check: login prompts win over weak positive signals."""
-        if not self.page.url.startswith("https://www.xiaohongshu.com"):
+        try:
+            current_url = self.page.url
+        except Exception:
+            return False
+        if not current_url.startswith("https://www.xiaohongshu.com"):
             return False
         for text in selectors.LOGIN_REQUIRED_TEXT:
-            if self.page.get_by_text(text, exact=False).first.is_visible(timeout=500):
+            if self._text_visible(text):
                 return False
         for locator in selectors.LOGGED_IN_MARKERS:
-            if self.page.locator(locator).first.is_visible(timeout=500):
+            if self._locator_visible(locator):
                 return True
         return False
+
+    def _text_visible(self, text: str) -> bool:
+        try:
+            return self.page.get_by_text(text, exact=False).first.is_visible(timeout=500)
+        except Exception:
+            return False
+
+    def _locator_visible(self, locator: str) -> bool:
+        try:
+            return self.page.locator(locator).first.is_visible(timeout=500)
+        except Exception:
+            return False
 
     def current_user_id(self) -> str | None:
         for locator in selectors.CURRENT_USER_LINKS:
