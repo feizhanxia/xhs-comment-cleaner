@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from playwright.sync_api import Page
+from playwright.async_api import Page
 
 from app.core.exceptions import LoginExpired, RiskControlDetected
 from app.xhs import selectors
 
 
-def detect_risk_control(page: Page) -> None:
+async def detect_risk_control(page: Page) -> None:
     body = page.locator("body")
     try:
-        text = body.inner_text(timeout=2_000)[:20_000]
+        text = (await body.inner_text(timeout=2_000))[:20_000]
     except Exception:
         return
     if any(marker in text for marker in selectors.RISK_TEXT):

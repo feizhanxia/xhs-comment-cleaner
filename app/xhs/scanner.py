@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import json
+import asyncio
 from collections.abc import Callable, Iterator
 from urllib.parse import urljoin
 
-from playwright.sync_api import Page, Response
+from playwright.async_api import Page, Response
 
 from app.core.exceptions import UnsupportedPageState
 from app.storage.database import Database
@@ -37,24 +37,31 @@ class HistoryScanner:
         self._seen: set[tuple[str, str]] = set()
         self._response_error: str | None = None
 
-    def scan_my_comment_history(self, max_stagnant_rounds: int = 5) -> tuple[int, bool]:
+    async def scan_my_comment_history(self, max_stagnant_rounds: int = 5) -> tuple[int, bool]:
         if not self.page.url.startswith("https://www.xiaohongshu.com/"):
             raise UnsupportedPageState("请先在 Edge 中打开小红书的评论互动记录页面")
-        detect_risk_control(self.page)
-        self.page.on("response", self._on_response)
+        await detect_risk_control(self.page)
+        response_tasks: set[asyncio.Task] = set()
+
+        def schedule_response(response: Response) -> None:
+            task = asyncio.create_task(self._on_response(response))
+            response_tasks.add(task)
+            task.add_done_callback(response_tasks.discard)
+
+        self.page.on("response", schedule_response)
         discovered_before = self.database.counts()["discovered"]
         stagnant = 0
         scan_complete = False
         try:
             while stagnant < max_stagnant_rounds and not self.should_pause():
                 before = self.database.counts()["discovered"]
-                self._extract_from_dom()
-                scan_complete = self._has_explicit_end_marker()
+                await self._extract_from_dom()
+                scan_complete = await self._has_explicit_end_marker()
                 if scan_complete:
                     break
-                self.page.mouse.wheel(0, 1400)
-                self.page.wait_for_timeout(1_500)
-                detect_risk_control(self.page)
+                await self.page.mouse.wheel(0, 1400)
+                await self.page.wait_for_timeout(1_500)
+                await detect_risk_control(self.page)
                 after = self.database.counts()["discovered"]
                 stagnant = stagnant + 1 if after == before else 0
             total = self.database.counts()["discovered"]
@@ -62,14 +69,16 @@ class HistoryScanner:
             self.database.set_state("last_scanned_url", self.page.url)
             return total - discovered_before, scan_complete
         finally:
-            self.page.remove_listener("response", self._on_response)
+            self.page.remove_listener("response", schedule_response)
+            if response_tasks:
+                await asyncio.gather(*response_tasks, return_exceptions=True)
 
-    def _on_response(self, response: Response) -> None:
+    async def _on_response(self, response: Response) -> None:
         content_type = response.headers.get("content-type", "")
         if "json" not in content_type or not response.ok:
             return
         try:
-            payload = response.json()
+            payload = await response.json()
             for item in self._walk_dicts(payload):
                 comment = self._comment_from_mapping(item)
                 if comment:
@@ -78,26 +87,26 @@ class HistoryScanner:
             # Response parsing is opportunistic; never interrupt the page request.
             self._response_error = type(exc).__name__
 
-    def _extract_from_dom(self) -> None:
+    async def _extract_from_dom(self) -> None:
         # DOM fallback only accepts containers exposing a stable comment ID and an
         # exact author profile link. No nth-child or positional guessing.
         for generic in selectors.COMMENT_CONTAINERS:
             try:
                 elements = self.page.locator(generic)
-                count = min(elements.count(), 500)
+                count = min(await elements.count(), 500)
             except Exception:
                 continue
             for index in range(count):
                 element = elements.nth(index)
-                comment_id = element.get_attribute("data-comment-id") or element.get_attribute("data-id")
-                author_href = element.locator(selectors.COMMENT_AUTHOR_LINK).first.get_attribute("href")
+                comment_id = await element.get_attribute("data-comment-id") or await element.get_attribute("data-id")
+                author_href = await element.locator(selectors.COMMENT_AUTHOR_LINK).first.get_attribute("href")
                 if not comment_id or not author_href or f"/user/profile/{self.current_user_id}" not in author_href:
                     continue
-                note_link = element.locator('a[href*="/explore/"]').first.get_attribute("href")
+                note_link = await element.locator('a[href*="/explore/"]').first.get_attribute("href")
                 feed_id = self._feed_id_from_url(note_link or self.page.url)
                 if not feed_id:
                     continue
-                content = element.inner_text(timeout=1_000)[:4000]
+                content = (await element.inner_text(timeout=1_000))[:4000]
                 self._persist(Comment(
                     id=None, feed_id=feed_id, comment_id=comment_id,
                     parent_comment_id=None, comment_type="comment", content=content,
@@ -140,9 +149,9 @@ class HistoryScanner:
         self.database.upsert_comment(comment)
         self.on_discovered(self.database.counts()["discovered"])
 
-    def _has_explicit_end_marker(self) -> bool:
+    async def _has_explicit_end_marker(self) -> bool:
         try:
-            text = self.page.locator("body").inner_text(timeout=2_000)[-5000:]
+            text = (await self.page.locator("body").inner_text(timeout=2_000))[-5000:]
             return any(marker in text for marker in selectors.HISTORY_END_TEXT)
         except Exception:
             return False

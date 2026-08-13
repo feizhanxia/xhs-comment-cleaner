@@ -32,6 +32,7 @@
 - 遇到验证码、访问频繁、账号异常或登录失效时暂停，等待用户人工处理。
 - SQLite 持久化每条结果，程序中断后可从待处理记录继续。
 - `app.log` 记录每次启动和关键操作；`crash.log` 保留无控制台 EXE 的未捕获异常，便于定位现场问题。
+- 浏览器自动化使用异步 Playwright，并固定在一个长期运行的专用 asyncio 线程；Windows 强制使用 Proactor event loop，避免同步 greenlet 桥与 GUI 线程模型冲突。
 
 ## 开发环境
 
@@ -77,7 +78,7 @@ dist\XHSCommentCleaner.exe
 
 PyInstaller spec 使用 windowed onefile，并收集 Playwright Python 驱动，但不会下载或打包浏览器。正式发布前应先另做 onedir 干净机验证；若 onefile 在目标机不稳定，应改用 onedir runtime 启动器方案，用户数据目录不能随 runtime 更新而删除。
 
-GitHub Actions 会在 `windows-latest` 上用 Python 3.12 运行测试、构建、启动 smoke test，并上传 EXE。推送 `v*` 标签时会自动创建带 EXE 和校验文件的 GitHub Release。
+GitHub Actions 会在 `windows-latest` 上用 Python 3.12 运行测试、构建、启动 GUI smoke test，并从打包后的 EXE 内实际启动异步 Playwright + 系统 Edge。全部通过后才上传 EXE；推送 `v*` 标签时会自动创建带 EXE 和校验文件的 GitHub Release。
 
 ## 用户数据
 

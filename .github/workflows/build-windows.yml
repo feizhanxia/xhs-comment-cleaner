@@ -42,13 +42,35 @@ jobs:
       - name: Build windowed onefile EXE
         run: python -m PyInstaller --noconfirm --clean XHSCommentCleaner.spec
 
-      - name: Smoke-test packaged EXE
+      - name: Verify sync Playwright is absent from EXE
+        shell: pwsh
+        run: |
+          $archive = pyi-archive_viewer -r ".\dist\XHSCommentCleaner.exe"
+          if ($archive -notmatch "playwright\.async_api") {
+            throw "Async Playwright API is missing from the packaged EXE"
+          }
+          if ($archive -match "playwright\.sync_api|playwright\._impl\._sync_base") {
+            throw "Sync Playwright API must not be packaged"
+          }
+
+      - name: Smoke-test packaged GUI
         shell: pwsh
         run: |
           $env:QT_QPA_PLATFORM = "offscreen"
           $process = Start-Process -FilePath ".\dist\XHSCommentCleaner.exe" -ArgumentList "--smoke-test" -Wait -PassThru
           if ($process.ExitCode -ne 0) {
             throw "Packaged EXE smoke test failed with exit code $($process.ExitCode)"
+          }
+
+      - name: Smoke-test async Playwright with system Edge
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $process = Start-Process -FilePath ".\dist\XHSCommentCleaner.exe" -ArgumentList "--browser-smoke-test" -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            Get-Content "$env:LOCALAPPDATA\XHSCommentCleaner\logs\app.log" -ErrorAction SilentlyContinue
+            Get-Content "$env:LOCALAPPDATA\XHSCommentCleaner\logs\crash.log" -ErrorAction SilentlyContinue
+            throw "Async Playwright Edge smoke test failed with exit code $($process.ExitCode)"
           }
 
       - name: Generate SHA-256 checksum

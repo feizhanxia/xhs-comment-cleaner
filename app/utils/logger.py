@@ -4,6 +4,7 @@ import logging
 import sys
 import threading
 import traceback
+from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -27,10 +28,13 @@ def configure_logging(log_file: Path, debug: bool = False) -> logging.Logger:
     return logger
 
 
-def install_exception_logging(logger: logging.Logger, crash_file: Path) -> None:
+def install_exception_logging(logger: logging.Logger, crash_file: Path, version: str = "unknown") -> None:
     """Keep GUI builds diagnosable even when no console is available."""
     global _crash_stream
     _crash_stream = crash_file.open("a", encoding="utf-8", buffering=1)
+    _crash_stream.write(
+        f"\n=== session {datetime.now().isoformat(timespec='seconds')} version={version} ===\n"
+    )
 
     def handle_exception(exc_type, exc_value, exc_traceback) -> None:
         if issubclass(exc_type, KeyboardInterrupt):

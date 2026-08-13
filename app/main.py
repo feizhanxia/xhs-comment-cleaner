@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 
@@ -26,11 +27,13 @@ class SafeApplication(QApplication):
 
 
 def main() -> int:
+    if sys.platform == "win32" and hasattr(asyncio, "WindowsProactorEventLoopPolicy"):
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
     app = SafeApplication(sys.argv)
     app.setApplicationName("XHSCommentCleaner")
     paths = get_app_paths()
     logger = configure_logging(paths.log_file, debug=os.environ.get("XHS_CLEANER_DEBUG") == "1")
-    install_exception_logging(logger, paths.logs / "crash.log")
+    install_exception_logging(logger, paths.logs / "crash.log", APP_VERSION)
     logger.info(
         "action=app_start version=%s platform=%s frozen=%s",
         APP_VERSION, sys.platform, bool(getattr(sys, "frozen", False)),
@@ -44,9 +47,24 @@ def main() -> int:
     database = Database(paths.database)
     window = MainWindow(paths, database, logger)
     window.show()
+    browser_smoke = "--browser-smoke-test" in sys.argv
+    browser_smoke_result = {"done": False, "ok": False}
+    if browser_smoke:
+        def finish_browser_smoke(ok: bool) -> None:
+            if browser_smoke_result["done"]:
+                return
+            browser_smoke_result.update(done=True, ok=ok)
+            window.close()
+
+        window.worker.browser_smoke_finished.connect(finish_browser_smoke)
+        QTimer.singleShot(300, window.worker.browser_smoke_test)
+        QTimer.singleShot(30_000, lambda: finish_browser_smoke(False))
     if "--smoke-test" in sys.argv:
         QTimer.singleShot(300, window.close)
-    return app.exec()
+    exit_code = app.exec()
+    if browser_smoke:
+        return 0 if browser_smoke_result["ok"] else 1
+    return exit_code
 
 
 if __name__ == "__main__":

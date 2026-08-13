@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
+from collections.abc import Awaitable, Callable
+from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from urllib.parse import urlsplit
 
-from PySide6.QtCore import QObject, QThread, Signal, Slot, Qt
+from PySide6.QtCore import QObject, Signal, Slot, Qt
 from PySide6.QtGui import QCloseEvent, QDesktopServices
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
@@ -41,6 +44,7 @@ class BrowserWorker(QObject):
     scan_finished = Signal(bool, int)
     error = Signal(str)
     finished = Signal()
+    browser_smoke_finished = Signal(bool)
 
     def __init__(self, paths: AppPaths, database: Database, logger: logging.Logger):
         super().__init__()
@@ -50,6 +54,65 @@ class BrowserWorker(QObject):
         self.browser: BrowserManager | None = None
         self.cleanup: CleanupManager | None = None
         self._pause_requested = threading.Event()
+        self._loop_ready = threading.Event()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._command_lock: asyncio.Lock | None = None
+        self._shutting_down = False
+        self._thread = threading.Thread(
+            target=self._thread_main,
+            name="XHSBrowserAsync",
+            daemon=False,
+        )
+        self._thread.start()
+
+    def _thread_main(self) -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._loop = loop
+        self._command_lock = asyncio.Lock()
+        self._loop_ready.set()
+        self.logger.info(
+            "action=browser_loop result=started loop=%s thread=%s",
+            type(loop).__name__, threading.current_thread().name,
+        )
+        try:
+            loop.run_forever()
+        finally:
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.close()
+            self.logger.info("action=browser_loop result=stopped")
+            self.finished.emit()
+
+    def _submit(self, operation: Callable[[], Awaitable[None]]) -> None:
+        if self._shutting_down:
+            return
+        if not self._loop_ready.wait(5) or not self._loop:
+            self.logger.error("action=browser_command result=failed error=loop_not_ready")
+            self.error.emit("浏览器后台服务未能启动，请重新打开程序。")
+            return
+        future = asyncio.run_coroutine_threadsafe(self._serialized(operation), self._loop)
+        future.add_done_callback(self._command_finished)
+
+    async def _serialized(self, operation: Callable[[], Awaitable[None]]) -> None:
+        assert self._command_lock is not None
+        async with self._command_lock:
+            await operation()
+
+    def _command_finished(self, future: Future) -> None:
+        if future.cancelled() or self._shutting_down:
+            return
+        try:
+            future.result()
+        except Exception as exc:
+            self.logger.exception(
+                "action=browser_command result=failed error=%s", type(exc).__name__
+            )
+            self.state_changed.emit(CleanupState.ERROR.value, "浏览器任务异常，已安全停止")
+            self.error.emit("浏览器任务异常，程序已安全停止。详细信息已写入日志。")
 
     def request_pause(self) -> None:
         self._pause_requested.set()
@@ -58,10 +121,13 @@ class BrowserWorker(QObject):
 
     @Slot()
     def open_xhs(self) -> None:
+        self._submit(self._open_xhs)
+
+    async def _open_xhs(self) -> None:
         self.logger.info("action=open_xhs result=started")
         try:
-            page = self._browser().open_xhs()
-            logged_in = LoginManager(page).is_logged_in()
+            page = await self._browser().open_xhs()
+            logged_in = await LoginManager(page).is_logged_in()
             self.login_changed.emit(logged_in)
             state = CleanupState.IDLE if logged_in else CleanupState.LOGIN_REQUIRED
             self.state_changed.emit(state.value, STATE_TEXT[state])
@@ -74,10 +140,13 @@ class BrowserWorker(QObject):
 
     @Slot()
     def check_login(self) -> None:
+        self._submit(self._check_login)
+
+    async def _check_login(self) -> None:
         self.logger.info("action=check_login result=started")
         try:
-            page = self._browser().start()
-            logged_in = LoginManager(page).is_logged_in()
+            page = await self._browser().start()
+            logged_in = await LoginManager(page).is_logged_in()
             self.login_changed.emit(logged_in)
             state = CleanupState.IDLE if logged_in else CleanupState.LOGIN_REQUIRED
             message = "登录状态正常，可以开始扫描" if logged_in else STATE_TEXT[state]
@@ -98,13 +167,16 @@ class BrowserWorker(QObject):
 
     @Slot()
     def scan(self) -> None:
+        self._submit(self._scan)
+
+    async def _scan(self) -> None:
         self._pause_requested.clear()
         try:
-            page = self._browser().start()
+            page = await self._browser().start()
             login = LoginManager(page)
-            if not login.is_logged_in():
+            if not await login.is_logged_in():
                 raise LoginExpired("请先在打开的 Edge 中完成登录")
-            user_id = login.current_user_id()
+            user_id = await login.current_user_id()
             if not user_id:
                 raise UnsupportedPageState("无法可靠识别当前登录账号，请打开个人主页后重试")
             self.database.set_state("current_user_id", user_id)
@@ -114,7 +186,7 @@ class BrowserWorker(QObject):
                 on_discovered=lambda _n: self.counts_changed.emit(self.database.counts()),
                 should_pause=self._pause_requested.is_set,
             )
-            _new_count, complete = scanner.scan_my_comment_history()
+            _new_count, complete = await scanner.scan_my_comment_history()
             total = self.database.counts()["discovered"]
             self.counts_changed.emit(self.database.counts())
             self.scan_finished.emit(complete, total)
@@ -127,22 +199,42 @@ class BrowserWorker(QObject):
         except RiskControlDetected as exc:
             self.state_changed.emit(CleanupState.BLOCKED.value, str(exc))
         except UnsupportedPageState as exc:
-            self._screenshot("scan_unsupported")
+            await self._screenshot("scan_unsupported")
             self.state_changed.emit(CleanupState.PAUSED.value, str(exc))
         except Exception:
-            self._screenshot("scan_failed")
+            await self._screenshot("scan_failed")
             self.logger.exception("action=scan result=failed")
             self.state_changed.emit(CleanupState.ERROR.value, "扫描失败，任务已停止")
 
     @Slot()
     def delete_all(self) -> None:
+        self._submit(self._delete_all)
+
+    @Slot()
+    def browser_smoke_test(self) -> None:
+        self._submit(self._browser_smoke_test)
+
+    async def _browser_smoke_test(self) -> None:
+        try:
+            page = await self._browser(headless=True).start()
+            self.logger.info(
+                "action=browser_smoke result=success api=async host=%s", self._page_host(page)
+            )
+            self.browser_smoke_finished.emit(True)
+        except Exception as exc:
+            self.logger.exception(
+                "action=browser_smoke result=failed error=%s", type(exc).__name__
+            )
+            self.browser_smoke_finished.emit(False)
+
+    async def _delete_all(self) -> None:
         self._pause_requested.clear()
         try:
-            page = self._browser().start()
+            page = await self._browser().start()
             login = LoginManager(page)
-            if not login.is_logged_in():
+            if not await login.is_logged_in():
                 raise LoginExpired("登录状态已失效，请重新登录小红书。")
-            current_user_id = login.current_user_id()
+            current_user_id = await login.current_user_id()
             saved_user_id = self.database.get_state("current_user_id")
             if not current_user_id or current_user_id != saved_user_id:
                 raise UnsupportedPageState("当前账号与扫描账号不一致，已停止删除")
@@ -153,7 +245,7 @@ class BrowserWorker(QObject):
                 wait_ms=page.wait_for_timeout,
                 screenshot=self._screenshot,
             )
-            self.cleanup.run()
+            await self.cleanup.run()
         except LoginExpired as exc:
             self.state_changed.emit(CleanupState.LOGIN_REQUIRED.value, str(exc))
         except UnsupportedPageState as exc:
@@ -161,7 +253,7 @@ class BrowserWorker(QObject):
         except EdgeUnavailable as exc:
             self.error.emit(str(exc))
         except Exception as exc:
-            self._screenshot("delete_unexpected")
+            await self._screenshot("delete_unexpected")
             self.logger.exception(
                 "action=delete_all result=failed error=%s", type(exc).__name__
             )
@@ -170,24 +262,37 @@ class BrowserWorker(QObject):
         finally:
             self.cleanup = None
 
-    @Slot()
-    def shutdown(self) -> None:
+    def shutdown_and_wait(self, timeout_seconds: float = 35) -> bool:
+        self._shutting_down = True
+        self.request_pause()
+        if not self._loop_ready.wait(5) or not self._loop:
+            return not self._thread.is_alive()
         try:
-            if self.browser:
-                self.browser.close()
+            future = asyncio.run_coroutine_threadsafe(self._shutdown(), self._loop)
+            future.result(timeout=timeout_seconds)
+        except FutureTimeoutError:
+            self.logger.warning("action=shutdown result=timeout")
+            return False
         except Exception:
             self.logger.exception("action=shutdown result=failed")
-        finally:
-            self.finished.emit()
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join(timeout=5)
+        return not self._thread.is_alive()
 
-    def _browser(self) -> BrowserManager:
+    async def _shutdown(self) -> None:
+        assert self._command_lock is not None
+        async with self._command_lock:
+            if self.browser:
+                await self.browser.close()
+
+    def _browser(self, headless: bool = False) -> BrowserManager:
         if self.browser is None:
-            self.browser = BrowserManager(self.paths.profile, self.logger)
+            self.browser = BrowserManager(self.paths.profile, self.logger, headless=headless)
         return self.browser
 
-    def _screenshot(self, label: str) -> None:
+    async def _screenshot(self, label: str) -> None:
         if self.browser:
-            self.browser.screenshot(self.paths.screenshots, label)
+            await self.browser.screenshot(self.paths.screenshots, label)
 
     @staticmethod
     def _page_host(page) -> str:
@@ -198,12 +303,6 @@ class BrowserWorker(QObject):
 
 
 class MainWindow(QMainWindow):
-    open_requested = Signal()
-    check_login_requested = Signal()
-    scan_requested = Signal()
-    delete_requested = Signal()
-    shutdown_requested = Signal()
-
     def __init__(self, paths: AppPaths, database: Database, logger: logging.Logger):
         super().__init__()
         self.paths = paths
@@ -211,6 +310,7 @@ class MainWindow(QMainWindow):
         self.logger = logger
         self.current_state = CleanupState.IDLE
         self.logged_in = False
+        self.worker = BrowserWorker(paths, database, logger)
         self.setWindowTitle("小红书历史评论清理工具")
         self.setMinimumSize(780, 720)
         self.resize(860, 780)
@@ -219,23 +319,11 @@ class MainWindow(QMainWindow):
         self._update_login(False)
         self.pause_button.setEnabled(False)
 
-        self.thread = QThread(self)
-        self.worker = BrowserWorker(paths, database, logger)
-        self.worker.moveToThread(self.thread)
-        self.open_requested.connect(self.worker.open_xhs)
-        self.check_login_requested.connect(self.worker.check_login)
-        self.scan_requested.connect(self.worker.scan)
-        self.delete_requested.connect(self.worker.delete_all)
-        self.shutdown_requested.connect(self.worker.shutdown)
         self.worker.state_changed.connect(self._set_state)
         self.worker.counts_changed.connect(self._update_counts)
         self.worker.login_changed.connect(self._update_login)
         self.worker.scan_finished.connect(self._scan_finished)
         self.worker.error.connect(self._show_error)
-        # quit() must run even while closeEvent is synchronously waiting for the
-        # worker; a queued connection back to the GUI thread would deadlock.
-        self.worker.finished.connect(self.thread.quit, Qt.DirectConnection)
-        self.thread.start()
         self._update_counts(self.database.counts())
 
     def _build_ui(self) -> None:
@@ -370,9 +458,9 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         self.setCentralWidget(central)
 
-        self.open_button.clicked.connect(self.open_requested.emit)
-        self.check_button.clicked.connect(self.check_login_requested.emit)
-        self.scan_button.clicked.connect(self.scan_requested.emit)
+        self.open_button.clicked.connect(self.worker.open_xhs)
+        self.check_button.clicked.connect(self.worker.check_login)
+        self.scan_button.clicked.connect(self.worker.scan)
         self.preview_button.clicked.connect(self._preview)
         self.delete_button.clicked.connect(self._confirm_delete)
         self.pause_button.clicked.connect(self._pause)
@@ -464,7 +552,7 @@ class MainWindow(QMainWindow):
     def _confirm_delete(self) -> None:
         pending = self.database.counts()["pending"]
         if pending and ConfirmDeleteDialog(pending, self).exec() == QDialog.Accepted:
-            self.delete_requested.emit()
+            self.worker.delete_all()
 
     def _pause(self) -> None:
         # Direct call is intentional: it only sets thread-safe Events, allowing the
@@ -488,8 +576,7 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
             self.worker.request_pause()
-        self.shutdown_requested.emit()
-        if not self.thread.wait(35_000):
+        if not self.worker.shutdown_and_wait(35):
             self.logger.warning("action=shutdown result=timeout")
             QMessageBox.warning(self, "正在安全退出", "当前操作尚未结束，请稍后再次关闭程序。")
             event.ignore()

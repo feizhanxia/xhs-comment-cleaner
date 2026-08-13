@@ -16,23 +16,23 @@ def comment(author_id: str | None = "mine", url: str = "https://www.xiaohongshu.
     )
 
 
-class DeletionSafetyTest(unittest.TestCase):
-    def test_refuses_mismatched_owner_before_navigation(self) -> None:
+class DeletionSafetyTest(unittest.IsolatedAsyncioTestCase):
+    async def test_refuses_mismatched_owner_before_navigation(self) -> None:
         page = Mock()
         with self.assertRaises(OwnershipNotConfirmed):
-            CommentDeleter(page, "mine").delete_comment(comment("someone-else"))
+            await CommentDeleter(page, "mine").delete_comment(comment("someone-else"))
         page.goto.assert_not_called()
 
-    def test_refuses_missing_owner_before_navigation(self) -> None:
+    async def test_refuses_missing_owner_before_navigation(self) -> None:
         page = Mock()
         with self.assertRaises(OwnershipNotConfirmed):
-            CommentDeleter(page, "mine").delete_comment(comment(None))
+            await CommentDeleter(page, "mine").delete_comment(comment(None))
         page.goto.assert_not_called()
 
-    def test_refuses_non_xhs_url_before_navigation(self) -> None:
+    async def test_refuses_non_xhs_url_before_navigation(self) -> None:
         page = Mock()
         with self.assertRaises(UnsupportedPageState):
-            CommentDeleter(page, "mine").delete_comment(comment("mine", "https://example.com/"))
+            await CommentDeleter(page, "mine").delete_comment(comment("mine", "https://example.com/"))
         page.goto.assert_not_called()
 
 

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import Mock
+import asyncio
+import threading
+from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 
 from app.browser.browser_manager import BrowserManager
 from app.browser.login_manager import LoginManager
@@ -14,7 +17,7 @@ class FakeLocator:
     def first(self):
         return self
 
-    def is_visible(self, timeout=None):
+    async def is_visible(self, timeout=None):
         raise RuntimeError("page changed while checking")
 
 
@@ -39,54 +42,90 @@ class ErrorUrlPage:
         raise RuntimeError("closed")
 
 
-class LoginResilienceTest(unittest.TestCase):
-    def test_dom_errors_are_treated_as_uncertain_not_raised(self) -> None:
+class LoginResilienceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_dom_errors_are_treated_as_uncertain_not_raised(self) -> None:
         page = FakePage("https://www.xiaohongshu.com/explore")
-        self.assertFalse(LoginManager(page).is_logged_in())
+        self.assertFalse(await LoginManager(page).is_logged_in())
 
-    def test_url_error_is_treated_as_not_logged_in(self) -> None:
-        self.assertFalse(LoginManager(ErrorUrlPage()).is_logged_in())
+    async def test_url_error_is_treated_as_not_logged_in(self) -> None:
+        self.assertFalse(await LoginManager(ErrorUrlPage()).is_logged_in())
 
-    def test_browser_reselects_live_xhs_tab_after_original_closed(self) -> None:
+    async def test_browser_reselects_live_xhs_tab_after_original_closed(self) -> None:
         manager = BrowserManager(Mock(), Mock())
         manager.page = FakePage("https://www.xiaohongshu.com/", closed=True)
         fallback = FakePage("edge://newtab/")
         xhs = FakePage("https://www.xiaohongshu.com/user/profile/me")
         manager.context = Mock()
         manager.context.pages = [manager.page, fallback, xhs]
-        self.assertIs(manager.active_page(), xhs)
+        self.assertIs(await manager.active_page(), xhs)
 
-    def test_generic_login_word_is_not_a_required_marker(self) -> None:
+    async def test_generic_login_word_is_not_a_required_marker(self) -> None:
         self.assertNotIn("登录", selectors.LOGIN_REQUIRED_TEXT)
 
-    def test_worker_converts_unexpected_check_error_to_ui_signal(self) -> None:
+    async def test_worker_converts_unexpected_check_error_to_ui_signal(self) -> None:
         worker = BrowserWorker(Mock(), Mock(), Mock())
         worker._browser = Mock(side_effect=RuntimeError("connection closed"))
         errors: list[str] = []
         states: list[tuple[str, str]] = []
         worker.error.connect(errors.append)
         worker.state_changed.connect(lambda state, text: states.append((state, text)))
+        try:
+            await worker._check_login()
+            self.assertEqual(len(errors), 1)
+            self.assertIn("检查登录状态失败", errors[0])
+            self.assertEqual(states[0][0], "ERROR")
+        finally:
+            worker.shutdown_and_wait()
 
-        worker.check_login()
-
-        self.assertEqual(len(errors), 1)
-        self.assertIn("检查登录状态失败", errors[0])
-        self.assertEqual(states[0][0], "ERROR")
-
-    def test_worker_survives_page_closing_during_login_check(self) -> None:
+    async def test_worker_survives_page_closing_during_login_check(self) -> None:
         browser = Mock()
-        browser.start.return_value = ErrorUrlPage()
+        browser.start = AsyncMock(return_value=ErrorUrlPage())
         worker = BrowserWorker(Mock(), Mock(), Mock())
         worker._browser = Mock(return_value=browser)
         errors: list[str] = []
         states: list[tuple[str, str]] = []
         worker.error.connect(errors.append)
         worker.state_changed.connect(lambda state, text: states.append((state, text)))
+        try:
+            await worker._check_login()
+            self.assertEqual(errors, [])
+            self.assertEqual(states[0][0], "LOGIN_REQUIRED")
+        finally:
+            worker.shutdown_and_wait()
 
-        worker.check_login()
+    async def test_production_code_does_not_import_sync_playwright(self) -> None:
+        sources = "\n".join(path.read_text(encoding="utf-8") for path in Path("app").rglob("*.py"))
+        self.assertNotIn("playwright.sync_api", sources)
 
-        self.assertEqual(errors, [])
-        self.assertEqual(states[0][0], "LOGIN_REQUIRED")
+    async def test_browser_commands_run_serially_on_dedicated_async_thread(self) -> None:
+        worker = BrowserWorker(Mock(), Mock(), Mock())
+        done = threading.Event()
+        order: list[str] = []
+        active = 0
+        max_active = 0
+        thread_ids: list[int] = []
+
+        async def operation(name: str) -> None:
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            thread_ids.append(threading.get_ident())
+            order.append(f"{name}:start")
+            await asyncio.sleep(0.02)
+            order.append(f"{name}:end")
+            active -= 1
+            if name == "second":
+                done.set()
+
+        try:
+            worker._submit(lambda: operation("first"))
+            worker._submit(lambda: operation("second"))
+            self.assertTrue(done.wait(2))
+            self.assertEqual(max_active, 1)
+            self.assertEqual(order, ["first:start", "first:end", "second:start", "second:end"])
+            self.assertTrue(all(thread_id == worker._thread.ident for thread_id in thread_ids))
+        finally:
+            worker.shutdown_and_wait()
 
 
 if __name__ == "__main__":

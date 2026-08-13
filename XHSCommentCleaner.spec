@@ -1,16 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
 
-from PyInstaller.utils.hooks import collect_all
-
-playwright_datas, playwright_binaries, playwright_hiddenimports = collect_all("playwright")
-
 a = Analysis(
     ["app/main.py"],
     pathex=["."],
-    binaries=playwright_binaries,
-    datas=playwright_datas,
-    hiddenimports=playwright_hiddenimports,
+    binaries=[],
+    datas=[],
+    hiddenimports=[],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
