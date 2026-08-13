@@ -41,7 +41,7 @@ class BrowserWorker(QObject):
     state_changed = Signal(str, str)
     counts_changed = Signal(dict)
     login_changed = Signal(bool)
-    scan_finished = Signal(bool, int)
+    scan_finished = Signal(bool, int, int)
     error = Signal(str)
     finished = Signal()
     browser_smoke_finished = Signal(bool)
@@ -192,11 +192,13 @@ class BrowserWorker(QObject):
             _new_count, complete = await scanner.scan_my_comment_history()
             total = self.database.counts()["discovered"]
             self.logger.info(
-                "action=scan result=success new=%d total=%d complete=%s",
-                _new_count, total, complete,
+                "action=scan result=success source=web_notifications new=%d total=%d "
+                "complete=%s notification_responses=%d parse_error=%s",
+                _new_count, total, complete, scanner.response_count,
+                scanner.response_error or "none",
             )
             self.counts_changed.emit(self.database.counts())
-            self.scan_finished.emit(complete, total)
+            self.scan_finished.emit(complete, total, scanner.response_count)
             state = CleanupState.PAUSED if self._pause_requested.is_set() else CleanupState.READY
             message = "扫描已暂停" if self._pause_requested.is_set() else "扫描完成，可以查看结果"
             self.state_changed.emit(state.value, message)
@@ -349,7 +351,7 @@ class MainWindow(QMainWindow):
         eyebrow.setObjectName("eyebrow")
         title = QLabel("历史评论清理")
         title.setObjectName("title")
-        subtitle = QLabel("本地运行 · 使用独立 Edge 环境 · 当前处于网页能力验证阶段")
+        subtitle = QLabel("本地运行 · 从互动通知找回可定位的历史评论")
         subtitle.setObjectName("subtitle")
         header_text.addWidget(eyebrow)
         header_text.addWidget(title)
@@ -416,7 +418,7 @@ class MainWindow(QMainWindow):
                 metrics.addWidget(divider)
         history_layout.addLayout(metrics)
         self.coverage_label = QLabel(
-            "网页端尚未发现可靠的历史评论入口；扫描会先验证当前页面，不会把无结果误报为 0 条。"
+            "自动扫描“评论和@ / 赞和收藏”通知，可找回曾收到回复或点赞的评论；暂不代表全部历史。"
         )
         self.coverage_label.setObjectName("muted")
         self.coverage_label.setWordWrap(True)
@@ -552,12 +554,15 @@ class MainWindow(QMainWindow):
             logged_in and not busy and self.database.counts()["pending"] > 0
         )
 
-    @Slot(bool, int)
-    def _scan_finished(self, complete: bool, total: int) -> None:
-        self.coverage_label.setText(
-            f"已明确到达记录末尾，共找到 {total} 条。" if complete else
-            f"已找到 {total} 条，但无法确认是否覆盖全部历史记录。"
-        )
+    @Slot(bool, int, int)
+    def _scan_finished(self, complete: bool, total: int, response_count: int) -> None:
+        if total:
+            text = f"已从互动通知找回 {total} 条可定位评论；未收到互动的评论暂不在此结果中。"
+        elif response_count:
+            text = "通知数据读取成功，但没有找到可确认属于你的原评论；0 不代表账号没有历史评论。"
+        else:
+            text = "没有收到通知接口数据，可能是页面入口或登录状态发生变化；请查看日志后反馈。"
+        self.coverage_label.setText(text)
 
     def _confirm_delete(self) -> None:
         pending = self.database.counts()["pending"]

@@ -23,10 +23,6 @@ COMMENT_BY_ID = (
     '[data-id="{comment_id}"][class*="comment"]',
     '#comment-{comment_id}',
 )
-COMMENT_CONTAINERS = (
-    '[data-comment-id]',
-    '[data-id][class*="comment"]',
-)
 COMMENT_AUTHOR_LINK = 'a[href*="/user/profile/"]'
 COMMENT_MENU_BUTTONS = ("更多", "评论操作")
 DELETE_TEXT = "删除"
@@ -36,11 +32,3 @@ RISK_TEXT = (
     "访问过于频繁", "操作频繁", "账号异常", "安全验证", "验证码", "请完成验证", "请求失败"
 )
 LOGIN_EXPIRED_TEXT = ("登录状态已失效", "请登录", "重新登录")
-
-# Used only to observe history items already rendered by a normal page.
-HISTORY_END_TEXT = ("没有更多了", "已经到底了")
-
-# A scan must never treat the home feed or an arbitrary note as a comment-history
-# source. These labels are deliberately narrow: if XHS does not expose a page that
-# explicitly identifies sent comments, scanning stops instead of reporting a false 0.
-SENT_COMMENT_HISTORY_TEXT = ("我发表的评论", "我发出的评论", "发出的评论")
