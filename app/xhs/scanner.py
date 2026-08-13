@@ -90,10 +90,12 @@ class HistoryScanner:
 
     async def _scan_current_notification_tab(self, max_stagnant_rounds: int) -> None:
         stagnant = 0
-        while stagnant < max_stagnant_rounds and not self.should_pause():
+        rounds = 0
+        while stagnant < max_stagnant_rounds and rounds < 100 and not self.should_pause():
+            rounds += 1
             before_comments = self.database.counts()["discovered"]
             before_responses = self._response_count
-            await self.page.mouse.wheel(0, 1800)
+            await self.page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             await self.page.wait_for_timeout(1_500)
             await detect_risk_control(self.page)
             changed = (
